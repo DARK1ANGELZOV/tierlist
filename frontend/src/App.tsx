@@ -375,8 +375,26 @@ function App() {
       if (typeof document !== 'undefined' && document.hidden) return;
       if (pendingSharedWritesRef.current > 0) return;
       void fetchCategory(active, 'shared', true).catch(() => null);
-    }, 2500);
+    }, 1000);
     return () => clearInterval(interval);
+  }, [mode, active]);
+
+  useEffect(() => {
+    if (mode !== 'shared') return;
+    const syncNow = () => {
+      if (pendingSharedWritesRef.current > 0) return;
+      void fetchCategory(active, 'shared', true).catch(() => null);
+    };
+    const onVisible = () => {
+      if (typeof document === 'undefined') return;
+      if (!document.hidden) syncNow();
+    };
+    window.addEventListener('focus', syncNow);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', syncNow);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [mode, active]);
 
   const openAdminModal = (nextError = '') => {
