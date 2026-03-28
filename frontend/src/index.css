@@ -367,3 +367,22 @@
   transform: translateY(0);
   pointer-events: auto;
 }
+
+.leaderboard-row {
+  border: 1px solid transparent;
+}
+
+.leaderboard-row-gold {
+  border-color: rgba(237, 178, 0, 0.55);
+  background: linear-gradient(90deg, rgba(237, 178, 0, 0.18), rgba(26, 26, 26, 0.95));
+}
+
+.leaderboard-row-silver {
+  border-color: rgba(192, 192, 192, 0.55);
+  background: linear-gradient(90deg, rgba(192, 192, 192, 0.16), rgba(26, 26, 26, 0.95));
+}
+
+.leaderboard-row-bronze {
+  border-color: rgba(205, 127, 50, 0.55);
+  background: linear-gradient(90deg, rgba(205, 127, 50, 0.16), rgba(26, 26, 26, 0.95));
+}

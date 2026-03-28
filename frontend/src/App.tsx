@@ -7,22 +7,33 @@ type Category = ApiCategory & { icon: string };
 type TierRank = { key: TierRankKey; tier: TierLevel; points: number };
 type Player = { id: number; name: string; score: number; rank: TierRankKey; tier: TierLevel };
 type TierEntry = { id: number; name: string; rank: TierRankKey; points: number; tier: TierLevel };
-type TierResponse = { tier1: TierEntry[]; tier2: TierEntry[]; tier3: TierEntry[]; tier4: TierEntry[]; tier5: TierEntry[] };
+type TierResponse = {
+  tier1: TierEntry[];
+  tier2: TierEntry[];
+  tier3: TierEntry[];
+  tier4: TierEntry[];
+  tier5: TierEntry[];
+};
 type TierBoard = Record<TierLevel, TierEntry[]>;
-type LocalState = Record<string, TierBoard>;
-type RuntimeMode = 'api' | 'local';
+type RuntimeMode = 'api' | 'shared';
+type SharedState = {
+  version: number;
+  nextId: number;
+  categories: Record<string, TierBoard>;
+};
 
 const RAW_API_URL = import.meta.env.VITE_API_URL;
-const API_URL = typeof RAW_API_URL === 'string' && RAW_API_URL.trim()
-  ? RAW_API_URL.trim()
-  : 'http://localhost:3005';
+const API_URL =
+  typeof RAW_API_URL === 'string' && RAW_API_URL.trim()
+    ? RAW_API_URL.trim()
+    : 'http://localhost:3005';
 const IS_GITHUB_PAGES =
   typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
-const FORCE_LOCAL_MODE = IS_GITHUB_PAGES && API_URL.includes('localhost');
+const FORCE_SHARED_MODE = IS_GITHUB_PAGES;
+const SHARED_STORE_URL =
+  'https://jsonblob.com/api/jsonBlob/019d34b1-b8b1-7a66-8372-be3865afd0aa';
 const TOKEN_KEY = 'elarium_admin_token';
-const LOCAL_STATE_KEY = 'elarium_local_state_v1';
-const LOCAL_NEXT_ID_KEY = 'elarium_local_next_id_v1';
-const LOCAL_ADMIN_TOKEN = 'elarium_local_admin_token';
+const SHARED_ADMIN_TOKEN = 'elarium_shared_admin_token';
 const ADMIN_PASSWORD = '0zqCqlJuMmZW67OJ';
 const CUP_ICON = 'https://cistiers.com/assets/cup512-r1aH9J6f.png';
 const AVATAR = 'https://storage.cistiers.com/fallback/bust.webp';
@@ -63,21 +74,17 @@ const TIER_RANKS = [
 type TierRankKey = (typeof TIER_RANKS)[number]['key'];
 
 const emptyBoard = (): TierBoard => ({ 1: [], 2: [], 3: [], 4: [], 5: [] });
-const normalize = (data?: Partial<TierResponse>): TierBoard => ({
+const normalizeApiBoard = (data?: Partial<TierResponse>): TierBoard => ({
   1: Array.isArray(data?.tier1) ? data.tier1 : [],
   2: Array.isArray(data?.tier2) ? data.tier2 : [],
   3: Array.isArray(data?.tier3) ? data.tier3 : [],
   4: Array.isArray(data?.tier4) ? data.tier4 : [],
   5: Array.isArray(data?.tier5) ? data.tier5 : [],
 });
-const normalizeLocalBoard = (value: unknown): TierBoard => {
-  if (!value || typeof value !== 'object') {
-    return emptyBoard();
-  }
-
+const normalizeStoredBoard = (value: unknown): TierBoard => {
+  if (!value || typeof value !== 'object') return emptyBoard();
   const input = value as Record<string, unknown>;
-  const toEntries = (key: string) => (Array.isArray(input[key]) ? input[key] as TierEntry[] : []);
-
+  const toEntries = (key: string) => (Array.isArray(input[key]) ? (input[key] as TierEntry[]) : []);
   return {
     1: toEntries('1'),
     2: toEntries('2'),
@@ -86,79 +93,94 @@ const normalizeLocalBoard = (value: unknown): TierBoard => {
     5: toEntries('5'),
   };
 };
+const rankMeta = (rank: TierRankKey) => TIER_RANKS.find((item) => item.key === rank) ?? TIER_RANKS[0];
 const sortPlayers = (items: Player[]) =>
-  [...items].sort(
-    (left, right) => right.score - left.score || left.name.localeCompare(right.name, 'ru'),
-  );
+  [...items].sort((left, right) => right.score - left.score || left.name.localeCompare(right.name, 'ru'));
 const buildPlayersFromBoard = (board: TierBoard): Player[] =>
-  sortPlayers(
-    [...board[1], ...board[2], ...board[3], ...board[4], ...board[5]].map((entry) => ({
-      id: entry.id,
-      name: entry.name,
-      score: entry.points,
-      rank: entry.rank,
-      tier: entry.tier,
-    })),
-  );
-const buildDefaultLocalState = (): LocalState =>
-  Object.fromEntries(FALLBACK.map((item) => [item.slug, emptyBoard()])) as LocalState;
-const readLocalState = (): LocalState => {
-  const defaults = buildDefaultLocalState();
-  const raw = localStorage.getItem(LOCAL_STATE_KEY);
-  if (!raw) {
+  sortPlayers([...board[1], ...board[2], ...board[3], ...board[4], ...board[5]].map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    score: entry.points,
+    rank: entry.rank,
+    tier: entry.tier,
+  })));
+const createDefaultSharedState = (): SharedState => ({
+  version: 1,
+  nextId: 1,
+  categories: Object.fromEntries(FALLBACK.map((item) => [item.slug, emptyBoard()])),
+});
+const normalizeSharedState = (value: unknown): SharedState => {
+  const defaults = createDefaultSharedState();
+  if (!value || typeof value !== 'object') {
     return defaults;
   }
 
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
+  const input = value as Partial<SharedState>;
+  if (typeof input.nextId === 'number' && Number.isFinite(input.nextId) && input.nextId > 0) {
+    defaults.nextId = Math.floor(input.nextId);
+  }
+
+  if (input.categories && typeof input.categories === 'object') {
     for (const item of FALLBACK) {
-      defaults[item.slug] = normalizeLocalBoard(parsed[item.slug]);
+      defaults.categories[item.slug] = normalizeStoredBoard(
+        (input.categories as Record<string, unknown>)[item.slug],
+      );
     }
-  } catch {
-    return defaults;
   }
 
   return defaults;
 };
-const writeLocalState = (state: LocalState) => {
-  localStorage.setItem(LOCAL_STATE_KEY, JSON.stringify(state));
-};
-const getRankMeta = (rankKey: TierRankKey): TierRank =>
-  TIER_RANKS.find((item) => item.key === rankKey) ?? TIER_RANKS[0];
-const getNextLocalId = () => {
-  const raw = Number(localStorage.getItem(LOCAL_NEXT_ID_KEY) ?? '1');
-  const current = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 1;
-  localStorage.setItem(LOCAL_NEXT_ID_KEY, String(current + 1));
-  return current;
-};
-const upsertLocalTierEntry = (state: LocalState, slug: string, rawName: string, rankKey: TierRankKey) => {
-  if (!state[slug]) {
-    state[slug] = emptyBoard();
+const readSharedState = async (): Promise<SharedState> => {
+  try {
+    const response = await axios.get<unknown>(SHARED_STORE_URL, { timeout: 6000 });
+    const normalized = normalizeSharedState(response.data);
+    return normalized;
+  } catch {
+    const initial = createDefaultSharedState();
+    try {
+      await axios.put(SHARED_STORE_URL, initial, { timeout: 6000 });
+    } catch {
+      // no-op, client will still work with in-memory fallback state
+    }
+    return initial;
   }
-
-  const name = rawName.trim();
-  const normalizedName = name.toLocaleLowerCase('ru');
+};
+const writeSharedState = async (state: SharedState) => {
+  await axios.put(SHARED_STORE_URL, state, { timeout: 6000 });
+};
+const upsertSharedEntry = (state: SharedState, slug: string, rawName: string, rank: TierRankKey) => {
+  if (!state.categories[slug]) {
+    state.categories[slug] = emptyBoard();
+  }
+  const board = state.categories[slug];
+  const normalizedName = rawName.trim().toLocaleLowerCase('ru');
   let existingId: number | null = null;
 
   for (const tier of TIERS) {
-    const idx = state[slug][tier].findIndex(
+    const idx = board[tier].findIndex(
       (entry) => entry.name.trim().toLocaleLowerCase('ru') === normalizedName,
     );
     if (idx >= 0) {
-      existingId = state[slug][tier][idx].id;
-      state[slug][tier].splice(idx, 1);
+      existingId = board[tier][idx].id;
+      board[tier].splice(idx, 1);
       break;
     }
   }
 
-  const rankMeta = getRankMeta(rankKey);
-  state[slug][rankMeta.tier].push({
-    id: existingId ?? getNextLocalId(),
-    name,
-    rank: rankMeta.key,
-    points: rankMeta.points,
-    tier: rankMeta.tier,
+  const meta = rankMeta(rank);
+  board[meta.tier].push({
+    id: existingId ?? state.nextId++,
+    name: rawName.trim(),
+    rank: meta.key,
+    points: meta.points,
+    tier: meta.tier,
   });
+};
+const placeClass = (index: number) => {
+  if (index === 0) return 'leaderboard-row-gold';
+  if (index === 1) return 'leaderboard-row-silver';
+  if (index === 2) return 'leaderboard-row-bronze';
+  return '';
 };
 const plural = (n: number) =>
   n % 10 === 1 && n % 100 !== 11
@@ -174,7 +196,7 @@ function App() {
   const [players, setPlayers] = useState<Record<string, Player[]>>({});
   const [boards, setBoards] = useState<Record<string, TierBoard>>({});
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<RuntimeMode>(FORCE_LOCAL_MODE ? 'local' : 'api');
+  const [mode, setMode] = useState<RuntimeMode>(FORCE_SHARED_MODE ? 'shared' : 'api');
 
   const [token, setToken] = useState('');
   const [adminOpen, setAdminOpen] = useState(false);
@@ -195,22 +217,22 @@ function App() {
   const activePlayers = players[active] ?? [];
   const activeBoard = boards[active] ?? emptyBoard();
 
-  const activateLocalMode = () => {
+  const activateSharedMode = async () => {
+    setMode('shared');
     const resolvedCategories = FALLBACK.map((item) => ({
       ...item,
       icon: ICONS[item.slug] ?? ICONS['m1-novi'],
     }));
-    const localState = readLocalState();
+    const shared = await readSharedState();
     const nextBoards: Record<string, TierBoard> = {};
     const nextPlayers: Record<string, Player[]> = {};
 
-    setMode('local');
     setRankOptions([...TIER_RANKS].sort((left, right) => left.points - right.points));
     setCats(resolvedCategories);
     setActive(resolvedCategories[0]?.slug ?? 'm1-novi');
 
     for (const item of resolvedCategories) {
-      const board = localState[item.slug] ?? emptyBoard();
+      const board = shared.categories[item.slug] ?? emptyBoard();
       nextBoards[item.slug] = board;
       nextPlayers[item.slug] = buildPlayersFromBoard(board);
     }
@@ -220,9 +242,9 @@ function App() {
   };
 
   const fetchCategory = async (slug: string, targetMode: RuntimeMode = mode) => {
-    if (targetMode === 'local') {
-      const state = readLocalState();
-      const board = state[slug] ?? emptyBoard();
+    if (targetMode === 'shared') {
+      const shared = await readSharedState();
+      const board = shared.categories[slug] ?? emptyBoard();
       setBoards((prev) => ({ ...prev, [slug]: board }));
       setPlayers((prev) => ({ ...prev, [slug]: buildPlayersFromBoard(board) }));
       return;
@@ -232,17 +254,14 @@ function App() {
       axios.get<Player[]>(`${API_URL}/categories/${slug}/leaderboard`),
       axios.get<TierResponse>(`${API_URL}/categories/${slug}/tiers`),
     ]);
-    setPlayers((prev) => ({
-      ...prev,
-      [slug]: sortPlayers(playersResponse.data),
-    }));
-    setBoards((prev) => ({ ...prev, [slug]: normalize(tiersResponse.data) }));
+    setPlayers((prev) => ({ ...prev, [slug]: sortPlayers(playersResponse.data) }));
+    setBoards((prev) => ({ ...prev, [slug]: normalizeApiBoard(tiersResponse.data) }));
   };
 
   useEffect(() => {
     const init = async () => {
-      if (FORCE_LOCAL_MODE) {
-        activateLocalMode();
+      if (FORCE_SHARED_MODE) {
+        await activateSharedMode();
         setLoading(false);
         return;
       }
@@ -250,39 +269,35 @@ function App() {
       try {
         await axios.get(`${API_URL}/health`, { timeout: 2500 });
         setMode('api');
-
         const [categoriesResponse, rankResponse] = await Promise.all([
           axios.get<ApiCategory[]>(`${API_URL}/categories`),
           axios.get<TierRank[]>(`${API_URL}/tier-ranks`).catch(() => ({ data: [...TIER_RANKS] })),
         ]);
-
         const resolvedCategories = (categoriesResponse.data.length
           ? categoriesResponse.data
           : FALLBACK
         ).map((item) => ({ ...item, icon: ICONS[item.slug] ?? ICONS['m1-novi'] }));
 
-        setRankOptions(
-          [...rankResponse.data].sort((left, right) => left.points - right.points),
-        );
+        setRankOptions([...rankResponse.data].sort((left, right) => left.points - right.points));
         setCats(resolvedCategories);
         setActive(resolvedCategories[0]?.slug ?? 'm1-novi');
-        await Promise.all(
-          resolvedCategories.map((item) => fetchCategory(item.slug, 'api').catch(() => null)),
-        );
+        await Promise.all(resolvedCategories.map((item) => fetchCategory(item.slug, 'api').catch(() => null)));
       } catch {
-        activateLocalMode();
+        await activateSharedMode();
       } finally {
         setLoading(false);
       }
     };
+
     void init();
   }, []);
 
   useEffect(() => {
     const saved = localStorage.getItem(TOKEN_KEY);
     if (!saved) return;
-    if (mode === 'local') {
-      if (saved === LOCAL_ADMIN_TOKEN) {
+
+    if (mode === 'shared') {
+      if (saved === SHARED_ADMIN_TOKEN) {
         setToken(saved);
       } else {
         localStorage.removeItem(TOKEN_KEY);
@@ -291,12 +306,18 @@ function App() {
     }
 
     axios
-      .get(`${API_URL}/admin/verify`, {
-        headers: { Authorization: `Bearer ${saved}` },
-      })
+      .get(`${API_URL}/admin/verify`, { headers: { Authorization: `Bearer ${saved}` } })
       .then(() => setToken(saved))
       .catch(() => localStorage.removeItem(TOKEN_KEY));
   }, [mode]);
+
+  useEffect(() => {
+    if (mode !== 'shared') return;
+    const interval = setInterval(() => {
+      void fetchCategory(active, 'shared').catch(() => null);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [mode, active]);
 
   const openAdminModal = (nextError = '') => {
     setPassword('');
@@ -305,10 +326,7 @@ function App() {
   };
 
   const onAuthError = (err: unknown) => {
-    if (mode !== 'api') {
-      return;
-    }
-
+    if (mode !== 'api') return;
     if (err instanceof AxiosError && err.response?.status === 401) {
       setToken('');
       localStorage.removeItem(TOKEN_KEY);
@@ -319,12 +337,13 @@ function App() {
 
   const doLogin = async () => {
     if (!password.trim()) return;
-    if (mode === 'local') {
+
+    if (mode === 'shared') {
       setBusy(true);
       setError('');
       if (password.trim() === ADMIN_PASSWORD) {
-        setToken(LOCAL_ADMIN_TOKEN);
-        localStorage.setItem(TOKEN_KEY, LOCAL_ADMIN_TOKEN);
+        setToken(SHARED_ADMIN_TOKEN);
+        localStorage.setItem(TOKEN_KEY, SHARED_ADMIN_TOKEN);
         setAdminOpen(false);
         setPassword('');
       } else {
@@ -349,10 +368,10 @@ function App() {
         if (err.response?.status === 401) {
           setError('Неверный пароль.');
         } else {
-          activateLocalMode();
+          await activateSharedMode();
           if (password.trim() === ADMIN_PASSWORD) {
-            setToken(LOCAL_ADMIN_TOKEN);
-            localStorage.setItem(TOKEN_KEY, LOCAL_ADMIN_TOKEN);
+            setToken(SHARED_ADMIN_TOKEN);
+            localStorage.setItem(TOKEN_KEY, SHARED_ADMIN_TOKEN);
             setAdminOpen(false);
             setPassword('');
           } else {
@@ -379,12 +398,13 @@ function App() {
 
   const submit = async () => {
     if (!name.trim() || !token) return;
-    if (mode === 'local') {
+
+    if (mode === 'shared') {
       setBusy(true);
-      const state = readLocalState();
-      upsertLocalTierEntry(state, active, name.trim(), rank);
-      writeLocalState(state);
-      await fetchCategory(active, 'local');
+      const shared = await readSharedState();
+      upsertSharedEntry(shared, active, name.trim(), rank);
+      await writeSharedState(shared);
+      await fetchCategory(active, 'shared');
       setEntryOpen(false);
       setBusy(false);
       return;
@@ -397,7 +417,7 @@ function App() {
         { name: name.trim(), rank },
         { headers },
       );
-      await fetchCategory(active);
+      await fetchCategory(active, 'api');
       setEntryOpen(false);
     } catch (err) {
       onAuthError(err);
@@ -434,6 +454,7 @@ function App() {
                     onClick={() => {
                       setActive(item.slug);
                       setView('tiers');
+                      void fetchCategory(item.slug).catch(() => null);
                     }}
                   >
                     <img
@@ -492,7 +513,10 @@ function App() {
                   </div>
                 ) : (
                   activePlayers.map((player, index) => (
-                    <div key={player.id} className="bg-[#1a1a1a] rounded-2xl p-4 flex items-center">
+                    <div
+                      key={player.id}
+                      className={`bg-[#1a1a1a] rounded-2xl p-4 flex items-center leaderboard-row ${placeClass(index)}`}
+                    >
                       <img src={AVATAR} alt={player.name} className="w-12 h-12 object-contain mr-3" />
                       <div className="flex-1">
                         <p className="font-bold">
