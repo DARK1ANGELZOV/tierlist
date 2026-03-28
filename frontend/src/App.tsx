@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import axios, { AxiosError } from 'axios';
 
 type TierLevel = 1 | 2 | 3 | 4 | 5;
@@ -148,6 +148,8 @@ const readSharedState = async (): Promise<SharedState> => {
 const writeSharedState = async (state: SharedState) => {
   await axios.put(SHARED_STORE_URL, state, { timeout: 6000 });
 };
+const cloneSharedState = (state: SharedState): SharedState =>
+  JSON.parse(JSON.stringify(state)) as SharedState;
 const upsertSharedEntry = (state: SharedState, slug: string, rawName: string, rank: TierRankKey) => {
   if (!state.categories[slug]) {
     state.categories[slug] = emptyBoard();
@@ -207,6 +209,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [rankOptions, setRankOptions] = useState<TierRank[]>([...TIER_RANKS]);
+  const sharedStateRef = useRef<SharedState | null>(null);
+  const sharedWriteQueueRef = useRef(Promise.resolve());
+  const pendingSharedWritesRef = useRef(0);
 
   const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
   const activeCat = cats.find((item) => item.slug === active) ?? {
@@ -224,6 +229,7 @@ function App() {
       icon: ICONS[item.slug] ?? ICONS['m1-novi'],
     }));
     const shared = await readSharedState();
+    sharedStateRef.current = shared;
     const nextBoards: Record<string, TierBoard> = {};
     const nextPlayers: Record<string, Player[]> = {};
 
@@ -244,6 +250,7 @@ function App() {
   const fetchCategory = async (slug: string, targetMode: RuntimeMode = mode) => {
     if (targetMode === 'shared') {
       const shared = await readSharedState();
+      sharedStateRef.current = shared;
       const board = shared.categories[slug] ?? emptyBoard();
       setBoards((prev) => ({ ...prev, [slug]: board }));
       setPlayers((prev) => ({ ...prev, [slug]: buildPlayersFromBoard(board) }));
@@ -314,6 +321,8 @@ function App() {
   useEffect(() => {
     if (mode !== 'shared') return;
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (pendingSharedWritesRef.current > 0) return;
       void fetchCategory(active, 'shared').catch(() => null);
     }, 5000);
     return () => clearInterval(interval);
@@ -400,13 +409,40 @@ function App() {
     if (!name.trim() || !token) return;
 
     if (mode === 'shared') {
+      const cleanName = name.trim();
       setBusy(true);
-      const shared = await readSharedState();
-      upsertSharedEntry(shared, active, name.trim(), rank);
-      await writeSharedState(shared);
-      await fetchCategory(active, 'shared');
+      setError('');
+
+      let shared = sharedStateRef.current;
+      if (!shared) {
+        shared = await readSharedState();
+      }
+
+      upsertSharedEntry(shared, active, cleanName, rank);
+      sharedStateRef.current = shared;
+
+      const board = shared.categories[active] ?? emptyBoard();
+      setBoards((prev) => ({ ...prev, [active]: board }));
+      setPlayers((prev) => ({ ...prev, [active]: buildPlayersFromBoard(board) }));
       setEntryOpen(false);
+      setName('');
+      setRank('Lt5');
       setBusy(false);
+
+      const snapshot = cloneSharedState(shared);
+      sharedWriteQueueRef.current = sharedWriteQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          pendingSharedWritesRef.current += 1;
+          try {
+            await writeSharedState(snapshot);
+          } finally {
+            pendingSharedWritesRef.current = Math.max(0, pendingSharedWritesRef.current - 1);
+          }
+        })
+        .catch(async () => {
+          await fetchCategory(active, 'shared');
+        });
       return;
     }
 
