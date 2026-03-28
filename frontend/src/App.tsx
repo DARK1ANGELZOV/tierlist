@@ -16,6 +16,9 @@ const RAW_API_URL = import.meta.env.VITE_API_URL;
 const API_URL = typeof RAW_API_URL === 'string' && RAW_API_URL.trim()
   ? RAW_API_URL.trim()
   : 'http://localhost:3005';
+const IS_GITHUB_PAGES =
+  typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
+const FORCE_LOCAL_MODE = IS_GITHUB_PAGES && API_URL.includes('localhost');
 const TOKEN_KEY = 'elarium_admin_token';
 const LOCAL_STATE_KEY = 'elarium_local_state_v1';
 const LOCAL_NEXT_ID_KEY = 'elarium_local_next_id_v1';
@@ -171,7 +174,7 @@ function App() {
   const [players, setPlayers] = useState<Record<string, Player[]>>({});
   const [boards, setBoards] = useState<Record<string, TierBoard>>({});
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<RuntimeMode>('api');
+  const [mode, setMode] = useState<RuntimeMode>(FORCE_LOCAL_MODE ? 'local' : 'api');
 
   const [token, setToken] = useState('');
   const [adminOpen, setAdminOpen] = useState(false);
@@ -191,6 +194,30 @@ function App() {
   };
   const activePlayers = players[active] ?? [];
   const activeBoard = boards[active] ?? emptyBoard();
+
+  const activateLocalMode = () => {
+    const resolvedCategories = FALLBACK.map((item) => ({
+      ...item,
+      icon: ICONS[item.slug] ?? ICONS['m1-novi'],
+    }));
+    const localState = readLocalState();
+    const nextBoards: Record<string, TierBoard> = {};
+    const nextPlayers: Record<string, Player[]> = {};
+
+    setMode('local');
+    setRankOptions([...TIER_RANKS].sort((left, right) => left.points - right.points));
+    setCats(resolvedCategories);
+    setActive(resolvedCategories[0]?.slug ?? 'm1-novi');
+
+    for (const item of resolvedCategories) {
+      const board = localState[item.slug] ?? emptyBoard();
+      nextBoards[item.slug] = board;
+      nextPlayers[item.slug] = buildPlayersFromBoard(board);
+    }
+
+    setBoards(nextBoards);
+    setPlayers(nextPlayers);
+  };
 
   const fetchCategory = async (slug: string, targetMode: RuntimeMode = mode) => {
     if (targetMode === 'local') {
@@ -214,29 +241,11 @@ function App() {
 
   useEffect(() => {
     const init = async () => {
-      const activateLocalMode = () => {
-        setMode('local');
-        const resolvedCategories = FALLBACK.map((item) => ({
-          ...item,
-          icon: ICONS[item.slug] ?? ICONS['m1-novi'],
-        }));
-        const localState = readLocalState();
-        const nextBoards: Record<string, TierBoard> = {};
-        const nextPlayers: Record<string, Player[]> = {};
-
-        setRankOptions([...TIER_RANKS].sort((left, right) => left.points - right.points));
-        setCats(resolvedCategories);
-        setActive(resolvedCategories[0]?.slug ?? 'm1-novi');
-
-        for (const item of resolvedCategories) {
-          const board = localState[item.slug] ?? emptyBoard();
-          nextBoards[item.slug] = board;
-          nextPlayers[item.slug] = buildPlayersFromBoard(board);
-        }
-
-        setBoards(nextBoards);
-        setPlayers(nextPlayers);
-      };
+      if (FORCE_LOCAL_MODE) {
+        activateLocalMode();
+        setLoading(false);
+        return;
+      }
 
       try {
         await axios.get(`${API_URL}/health`, { timeout: 2500 });
@@ -340,7 +349,15 @@ function App() {
         if (err.response?.status === 401) {
           setError('Неверный пароль.');
         } else {
-          setError(`Сервер недоступен (${API_URL}). Проверь backend и VITE_API_URL.`);
+          activateLocalMode();
+          if (password.trim() === ADMIN_PASSWORD) {
+            setToken(LOCAL_ADMIN_TOKEN);
+            localStorage.setItem(TOKEN_KEY, LOCAL_ADMIN_TOKEN);
+            setAdminOpen(false);
+            setPassword('');
+          } else {
+            setError('Неверный пароль.');
+          }
         }
       } else {
         setError('Ошибка входа. Попробуй еще раз.');
