@@ -154,21 +154,21 @@ const persistSharedState = (state: SharedState) => {
     // ignore quota/storage exceptions
   }
 };
-const readSharedState = async (): Promise<SharedState> => {
+const readSharedState = async (options?: {
+  fallback?: SharedState | null;
+  allowDefaultOnError?: boolean;
+}): Promise<SharedState> => {
   try {
     const response = await axios.get<unknown>(SHARED_STORE_URL, { timeout: 6000 });
     const normalized = normalizeSharedState(response.data);
     persistSharedState(normalized);
     return normalized;
-  } catch {
-    const initial = createDefaultSharedState();
-    try {
-      await axios.put(SHARED_STORE_URL, initial, { timeout: 6000 });
-      persistSharedState(initial);
-    } catch {
-      // no-op, client will still work with in-memory fallback state
-    }
-    return initial;
+  } catch (error) {
+    const cached = readCachedSharedState();
+    if (cached) return cached;
+    if (options?.fallback) return cloneSharedState(options.fallback);
+    if (options?.allowDefaultOnError) return createDefaultSharedState();
+    throw error;
   }
 };
 const writeSharedState = async (state: SharedState) => {
@@ -277,7 +277,7 @@ function App() {
     setBoards(cachedCollections.nextBoards);
     setPlayers(cachedCollections.nextPlayers);
 
-    void readSharedState()
+    void readSharedState({ fallback: cached })
       .then((shared) => {
         sharedStateRef.current = shared;
         const remoteCollections = buildSharedCollections(shared, resolvedCategories);
@@ -300,7 +300,7 @@ function App() {
         return;
       }
 
-      const shared = await readSharedState();
+      const shared = await readSharedState({ fallback: sharedStateRef.current });
       sharedStateRef.current = shared;
       const board = shared.categories[slug] ?? emptyBoard();
       setBoards((prev) => ({ ...prev, [slug]: board }));
@@ -484,7 +484,7 @@ function App() {
 
       let shared = sharedStateRef.current;
       if (!shared) {
-        shared = await readSharedState();
+        shared = await readSharedState({ allowDefaultOnError: true });
       }
 
       upsertSharedEntry(shared, active, cleanName, rank);
