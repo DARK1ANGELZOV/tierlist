@@ -148,13 +148,18 @@ function App() {
       .catch(() => localStorage.removeItem(TOKEN_KEY));
   }, []);
 
+  const openAdminModal = (nextError = '') => {
+    setPassword(DEFAULT_ADMIN_PASSWORD);
+    setError(nextError);
+    setAdminOpen(true);
+  };
+
   const onAuthError = (err: unknown) => {
     if (err instanceof AxiosError && err.response?.status === 401) {
       setToken('');
       localStorage.removeItem(TOKEN_KEY);
       setEntryOpen(false);
-      setError('Сессия администратора истекла.');
-      setAdminOpen(true);
+      openAdminModal('Сессия администратора истекла.');
     }
   };
 
@@ -180,8 +185,7 @@ function App() {
     setName('');
     setRank('Lt5');
     if (!token) {
-      setError('Нужен вход администратора.');
-      setAdminOpen(true);
+      openAdminModal('Нужен вход администратора.');
       return;
     }
     setEntryOpen(true);
@@ -260,7 +264,7 @@ function App() {
                       localStorage.removeItem(TOKEN_KEY);
                       return;
                     }
-                    setAdminOpen(true);
+                    openAdminModal();
                   }}
                 >
                   <img src={token ? ICONS.unlock : ICONS.lock} alt="Админ" className="w-5 h-5 opacity-80" />
@@ -359,7 +363,6 @@ function App() {
 
       {adminOpen ? (
         <Modal title="Вход администратора" onClose={() => setAdminOpen(false)}>
-          <p className="text-text/70 mb-3">Пароль: {DEFAULT_ADMIN_PASSWORD}</p>
           <input
             type="password"
             value={password}
