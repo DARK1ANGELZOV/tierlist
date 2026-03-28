@@ -32,6 +32,7 @@ const IS_GITHUB_PAGES =
 const FORCE_SHARED_MODE = IS_GITHUB_PAGES;
 const SHARED_STORE_URL =
   'https://jsonblob.com/api/jsonBlob/019d34b1-b8b1-7a66-8372-be3865afd0aa';
+const SHARED_CACHE_KEY = 'elarium_shared_state_cache_v1';
 const TOKEN_KEY = 'elarium_admin_token';
 const SHARED_ADMIN_TOKEN = 'elarium_shared_admin_token';
 const ADMIN_PASSWORD = '0zqCqlJuMmZW67OJ';
@@ -130,15 +131,40 @@ const normalizeSharedState = (value: unknown): SharedState => {
 
   return defaults;
 };
+const readCachedSharedState = (): SharedState | null => {
+  if (typeof window === 'undefined') return null;
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(SHARED_CACHE_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    return normalizeSharedState(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+};
+const persistSharedState = (state: SharedState) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SHARED_CACHE_KEY, JSON.stringify(state));
+  } catch {
+    // ignore quota/storage exceptions
+  }
+};
 const readSharedState = async (): Promise<SharedState> => {
   try {
     const response = await axios.get<unknown>(SHARED_STORE_URL, { timeout: 6000 });
     const normalized = normalizeSharedState(response.data);
+    persistSharedState(normalized);
     return normalized;
   } catch {
     const initial = createDefaultSharedState();
     try {
       await axios.put(SHARED_STORE_URL, initial, { timeout: 6000 });
+      persistSharedState(initial);
     } catch {
       // no-op, client will still work with in-memory fallback state
     }
@@ -147,9 +173,22 @@ const readSharedState = async (): Promise<SharedState> => {
 };
 const writeSharedState = async (state: SharedState) => {
   await axios.put(SHARED_STORE_URL, state, { timeout: 6000 });
+  persistSharedState(state);
 };
 const cloneSharedState = (state: SharedState): SharedState =>
   JSON.parse(JSON.stringify(state)) as SharedState;
+const buildSharedCollections = (state: SharedState, categories: Category[]) => {
+  const nextBoards: Record<string, TierBoard> = {};
+  const nextPlayers: Record<string, Player[]> = {};
+
+  for (const item of categories) {
+    const board = state.categories[item.slug] ?? emptyBoard();
+    nextBoards[item.slug] = board;
+    nextPlayers[item.slug] = buildPlayersFromBoard(board);
+  }
+
+  return { nextBoards, nextPlayers };
+};
 const upsertSharedEntry = (state: SharedState, slug: string, rawName: string, rank: TierRankKey) => {
   if (!state.categories[slug]) {
     state.categories[slug] = emptyBoard();
@@ -228,27 +267,39 @@ function App() {
       ...item,
       icon: ICONS[item.slug] ?? ICONS['m1-novi'],
     }));
-    const shared = await readSharedState();
-    sharedStateRef.current = shared;
-    const nextBoards: Record<string, TierBoard> = {};
-    const nextPlayers: Record<string, Player[]> = {};
-
     setRankOptions([...TIER_RANKS].sort((left, right) => left.points - right.points));
     setCats(resolvedCategories);
     setActive(resolvedCategories[0]?.slug ?? 'm1-novi');
 
-    for (const item of resolvedCategories) {
-      const board = shared.categories[item.slug] ?? emptyBoard();
-      nextBoards[item.slug] = board;
-      nextPlayers[item.slug] = buildPlayersFromBoard(board);
-    }
+    const cached = readCachedSharedState() ?? createDefaultSharedState();
+    sharedStateRef.current = cached;
+    const cachedCollections = buildSharedCollections(cached, resolvedCategories);
+    setBoards(cachedCollections.nextBoards);
+    setPlayers(cachedCollections.nextPlayers);
 
-    setBoards(nextBoards);
-    setPlayers(nextPlayers);
+    void readSharedState()
+      .then((shared) => {
+        sharedStateRef.current = shared;
+        const remoteCollections = buildSharedCollections(shared, resolvedCategories);
+        setBoards(remoteCollections.nextBoards);
+        setPlayers(remoteCollections.nextPlayers);
+      })
+      .catch(() => null);
   };
 
-  const fetchCategory = async (slug: string, targetMode: RuntimeMode = mode) => {
+  const fetchCategory = async (
+    slug: string,
+    targetMode: RuntimeMode = mode,
+    forceRemote = false,
+  ) => {
     if (targetMode === 'shared') {
+      if (!forceRemote && sharedStateRef.current) {
+        const board = sharedStateRef.current.categories[slug] ?? emptyBoard();
+        setBoards((prev) => ({ ...prev, [slug]: board }));
+        setPlayers((prev) => ({ ...prev, [slug]: buildPlayersFromBoard(board) }));
+        return;
+      }
+
       const shared = await readSharedState();
       sharedStateRef.current = shared;
       const board = shared.categories[slug] ?? emptyBoard();
@@ -323,8 +374,8 @@ function App() {
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       if (pendingSharedWritesRef.current > 0) return;
-      void fetchCategory(active, 'shared').catch(() => null);
-    }, 5000);
+      void fetchCategory(active, 'shared', true).catch(() => null);
+    }, 2500);
     return () => clearInterval(interval);
   }, [mode, active]);
 
@@ -490,7 +541,9 @@ function App() {
                     onClick={() => {
                       setActive(item.slug);
                       setView('tiers');
-                      void fetchCategory(item.slug).catch(() => null);
+                      if (mode === 'api') {
+                        void fetchCategory(item.slug, 'api').catch(() => null);
+                      }
                     }}
                   >
                     <img
