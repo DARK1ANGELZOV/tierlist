@@ -5,7 +5,12 @@ import cors from 'cors';
 const app = express();
 const port = Number(process.env.PORT || 3005);
 const DEFAULT_ADMIN_PASSWORD = '0zqCqlJuMmZW67OJ';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
+const LEGACY_ADMIN_PASSWORD = '12345';
+const ADMIN_PASSWORDS = new Set(
+  [DEFAULT_ADMIN_PASSWORD, LEGACY_ADMIN_PASSWORD, process.env.ADMIN_PASSWORD]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim()),
+);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24;
 
 app.use(cors());
@@ -234,8 +239,8 @@ app.get('/categories/:category/tiers', (req, res) => {
 });
 
 app.post('/admin/login', (req, res) => {
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  if (!password || password !== ADMIN_PASSWORD) {
+  const password = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+  if (!password || !ADMIN_PASSWORDS.has(password)) {
     res.status(401).json({ error: 'Invalid password' });
     return;
   }

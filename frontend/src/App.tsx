@@ -10,7 +10,10 @@ type TierEntry = { id: number; name: string; rank: TierRankKey; points: number; 
 type TierResponse = { tier1: TierEntry[]; tier2: TierEntry[]; tier3: TierEntry[]; tier4: TierEntry[]; tier5: TierEntry[] };
 type TierBoard = Record<TierLevel, TierEntry[]>;
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3005';
+const RAW_API_URL = import.meta.env.VITE_API_URL;
+const API_URL = typeof RAW_API_URL === 'string' && RAW_API_URL.trim()
+  ? RAW_API_URL.trim()
+  : 'http://localhost:3005';
 const TOKEN_KEY = 'elarium_admin_token';
 const CUP_ICON = 'https://cistiers.com/assets/cup512-r1aH9J6f.png';
 const AVATAR = 'https://storage.cistiers.com/fallback/bust.webp';
