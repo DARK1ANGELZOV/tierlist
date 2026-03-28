@@ -12,7 +12,6 @@ type TierBoard = Record<TierLevel, TierEntry[]>;
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3005';
 const TOKEN_KEY = 'elarium_admin_token';
-const DEFAULT_ADMIN_PASSWORD = '0zqCqlJuMmZW67OJ';
 const CUP_ICON = 'https://cistiers.com/assets/cup512-r1aH9J6f.png';
 const AVATAR = 'https://storage.cistiers.com/fallback/bust.webp';
 const ICONS: Record<string, string> = {
@@ -77,7 +76,7 @@ function App() {
   const [token, setToken] = useState('');
   const [adminOpen, setAdminOpen] = useState(false);
   const [entryOpen, setEntryOpen] = useState(false);
-  const [password, setPassword] = useState(DEFAULT_ADMIN_PASSWORD);
+  const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [rank, setRank] = useState<TierRankKey>('Lt5');
   const [busy, setBusy] = useState(false);
@@ -149,7 +148,7 @@ function App() {
   }, []);
 
   const openAdminModal = (nextError = '') => {
-    setPassword(DEFAULT_ADMIN_PASSWORD);
+    setPassword('');
     setError(nextError);
     setAdminOpen(true);
   };
@@ -174,8 +173,17 @@ function App() {
       setToken(response.data.token);
       localStorage.setItem(TOKEN_KEY, response.data.token);
       setAdminOpen(false);
-    } catch {
-      setError('Неверный пароль.');
+      setPassword('');
+    } catch (err) {
+      if (err instanceof AxiosError) {
+        if (err.response?.status === 401) {
+          setError('Неверный пароль.');
+        } else {
+          setError(`Сервер недоступен (${API_URL}). Проверь backend и VITE_API_URL.`);
+        }
+      } else {
+        setError('Ошибка входа. Попробуй еще раз.');
+      }
     } finally {
       setBusy(false);
     }
