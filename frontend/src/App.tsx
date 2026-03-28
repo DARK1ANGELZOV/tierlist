@@ -9,12 +9,18 @@ type Player = { id: number; name: string; score: number; rank: TierRankKey; tier
 type TierEntry = { id: number; name: string; rank: TierRankKey; points: number; tier: TierLevel };
 type TierResponse = { tier1: TierEntry[]; tier2: TierEntry[]; tier3: TierEntry[]; tier4: TierEntry[]; tier5: TierEntry[] };
 type TierBoard = Record<TierLevel, TierEntry[]>;
+type LocalState = Record<string, TierBoard>;
+type RuntimeMode = 'api' | 'local';
 
 const RAW_API_URL = import.meta.env.VITE_API_URL;
 const API_URL = typeof RAW_API_URL === 'string' && RAW_API_URL.trim()
   ? RAW_API_URL.trim()
   : 'http://localhost:3005';
 const TOKEN_KEY = 'elarium_admin_token';
+const LOCAL_STATE_KEY = 'elarium_local_state_v1';
+const LOCAL_NEXT_ID_KEY = 'elarium_local_next_id_v1';
+const LOCAL_ADMIN_TOKEN = 'elarium_local_admin_token';
+const ADMIN_PASSWORD = '0zqCqlJuMmZW67OJ';
 const CUP_ICON = 'https://cistiers.com/assets/cup512-r1aH9J6f.png';
 const AVATAR = 'https://storage.cistiers.com/fallback/bust.webp';
 const ICONS: Record<string, string> = {
@@ -61,6 +67,96 @@ const normalize = (data?: Partial<TierResponse>): TierBoard => ({
   4: Array.isArray(data?.tier4) ? data.tier4 : [],
   5: Array.isArray(data?.tier5) ? data.tier5 : [],
 });
+const normalizeLocalBoard = (value: unknown): TierBoard => {
+  if (!value || typeof value !== 'object') {
+    return emptyBoard();
+  }
+
+  const input = value as Record<string, unknown>;
+  const toEntries = (key: string) => (Array.isArray(input[key]) ? input[key] as TierEntry[] : []);
+
+  return {
+    1: toEntries('1'),
+    2: toEntries('2'),
+    3: toEntries('3'),
+    4: toEntries('4'),
+    5: toEntries('5'),
+  };
+};
+const sortPlayers = (items: Player[]) =>
+  [...items].sort(
+    (left, right) => right.score - left.score || left.name.localeCompare(right.name, 'ru'),
+  );
+const buildPlayersFromBoard = (board: TierBoard): Player[] =>
+  sortPlayers(
+    [...board[1], ...board[2], ...board[3], ...board[4], ...board[5]].map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      score: entry.points,
+      rank: entry.rank,
+      tier: entry.tier,
+    })),
+  );
+const buildDefaultLocalState = (): LocalState =>
+  Object.fromEntries(FALLBACK.map((item) => [item.slug, emptyBoard()])) as LocalState;
+const readLocalState = (): LocalState => {
+  const defaults = buildDefaultLocalState();
+  const raw = localStorage.getItem(LOCAL_STATE_KEY);
+  if (!raw) {
+    return defaults;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    for (const item of FALLBACK) {
+      defaults[item.slug] = normalizeLocalBoard(parsed[item.slug]);
+    }
+  } catch {
+    return defaults;
+  }
+
+  return defaults;
+};
+const writeLocalState = (state: LocalState) => {
+  localStorage.setItem(LOCAL_STATE_KEY, JSON.stringify(state));
+};
+const getRankMeta = (rankKey: TierRankKey): TierRank =>
+  TIER_RANKS.find((item) => item.key === rankKey) ?? TIER_RANKS[0];
+const getNextLocalId = () => {
+  const raw = Number(localStorage.getItem(LOCAL_NEXT_ID_KEY) ?? '1');
+  const current = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 1;
+  localStorage.setItem(LOCAL_NEXT_ID_KEY, String(current + 1));
+  return current;
+};
+const upsertLocalTierEntry = (state: LocalState, slug: string, rawName: string, rankKey: TierRankKey) => {
+  if (!state[slug]) {
+    state[slug] = emptyBoard();
+  }
+
+  const name = rawName.trim();
+  const normalizedName = name.toLocaleLowerCase('ru');
+  let existingId: number | null = null;
+
+  for (const tier of TIERS) {
+    const idx = state[slug][tier].findIndex(
+      (entry) => entry.name.trim().toLocaleLowerCase('ru') === normalizedName,
+    );
+    if (idx >= 0) {
+      existingId = state[slug][tier][idx].id;
+      state[slug][tier].splice(idx, 1);
+      break;
+    }
+  }
+
+  const rankMeta = getRankMeta(rankKey);
+  state[slug][rankMeta.tier].push({
+    id: existingId ?? getNextLocalId(),
+    name,
+    rank: rankMeta.key,
+    points: rankMeta.points,
+    tier: rankMeta.tier,
+  });
+};
 const plural = (n: number) =>
   n % 10 === 1 && n % 100 !== 11
     ? 'очко'
@@ -75,6 +171,7 @@ function App() {
   const [players, setPlayers] = useState<Record<string, Player[]>>({});
   const [boards, setBoards] = useState<Record<string, TierBoard>>({});
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<RuntimeMode>('api');
 
   const [token, setToken] = useState('');
   const [adminOpen, setAdminOpen] = useState(false);
@@ -95,23 +192,56 @@ function App() {
   const activePlayers = players[active] ?? [];
   const activeBoard = boards[active] ?? emptyBoard();
 
-  const fetchCategory = async (slug: string) => {
+  const fetchCategory = async (slug: string, targetMode: RuntimeMode = mode) => {
+    if (targetMode === 'local') {
+      const state = readLocalState();
+      const board = state[slug] ?? emptyBoard();
+      setBoards((prev) => ({ ...prev, [slug]: board }));
+      setPlayers((prev) => ({ ...prev, [slug]: buildPlayersFromBoard(board) }));
+      return;
+    }
+
     const [playersResponse, tiersResponse] = await Promise.all([
       axios.get<Player[]>(`${API_URL}/categories/${slug}/leaderboard`),
       axios.get<TierResponse>(`${API_URL}/categories/${slug}/tiers`),
     ]);
     setPlayers((prev) => ({
       ...prev,
-      [slug]: [...playersResponse.data].sort(
-        (left, right) => right.score - left.score || left.name.localeCompare(right.name, 'ru'),
-      ),
+      [slug]: sortPlayers(playersResponse.data),
     }));
     setBoards((prev) => ({ ...prev, [slug]: normalize(tiersResponse.data) }));
   };
 
   useEffect(() => {
     const init = async () => {
+      const activateLocalMode = () => {
+        setMode('local');
+        const resolvedCategories = FALLBACK.map((item) => ({
+          ...item,
+          icon: ICONS[item.slug] ?? ICONS['m1-novi'],
+        }));
+        const localState = readLocalState();
+        const nextBoards: Record<string, TierBoard> = {};
+        const nextPlayers: Record<string, Player[]> = {};
+
+        setRankOptions([...TIER_RANKS].sort((left, right) => left.points - right.points));
+        setCats(resolvedCategories);
+        setActive(resolvedCategories[0]?.slug ?? 'm1-novi');
+
+        for (const item of resolvedCategories) {
+          const board = localState[item.slug] ?? emptyBoard();
+          nextBoards[item.slug] = board;
+          nextPlayers[item.slug] = buildPlayersFromBoard(board);
+        }
+
+        setBoards(nextBoards);
+        setPlayers(nextPlayers);
+      };
+
       try {
+        await axios.get(`${API_URL}/health`, { timeout: 2500 });
+        setMode('api');
+
         const [categoriesResponse, rankResponse] = await Promise.all([
           axios.get<ApiCategory[]>(`${API_URL}/categories`),
           axios.get<TierRank[]>(`${API_URL}/tier-ranks`).catch(() => ({ data: [...TIER_RANKS] })),
@@ -128,10 +258,10 @@ function App() {
         setCats(resolvedCategories);
         setActive(resolvedCategories[0]?.slug ?? 'm1-novi');
         await Promise.all(
-          resolvedCategories.map((item) => fetchCategory(item.slug).catch(() => null)),
+          resolvedCategories.map((item) => fetchCategory(item.slug, 'api').catch(() => null)),
         );
       } catch {
-        setCats(FALLBACK.map((item) => ({ ...item, icon: ICONS[item.slug] })));
+        activateLocalMode();
       } finally {
         setLoading(false);
       }
@@ -142,13 +272,22 @@ function App() {
   useEffect(() => {
     const saved = localStorage.getItem(TOKEN_KEY);
     if (!saved) return;
+    if (mode === 'local') {
+      if (saved === LOCAL_ADMIN_TOKEN) {
+        setToken(saved);
+      } else {
+        localStorage.removeItem(TOKEN_KEY);
+      }
+      return;
+    }
+
     axios
       .get(`${API_URL}/admin/verify`, {
         headers: { Authorization: `Bearer ${saved}` },
       })
       .then(() => setToken(saved))
       .catch(() => localStorage.removeItem(TOKEN_KEY));
-  }, []);
+  }, [mode]);
 
   const openAdminModal = (nextError = '') => {
     setPassword('');
@@ -157,6 +296,10 @@ function App() {
   };
 
   const onAuthError = (err: unknown) => {
+    if (mode !== 'api') {
+      return;
+    }
+
     if (err instanceof AxiosError && err.response?.status === 401) {
       setToken('');
       localStorage.removeItem(TOKEN_KEY);
@@ -167,6 +310,21 @@ function App() {
 
   const doLogin = async () => {
     if (!password.trim()) return;
+    if (mode === 'local') {
+      setBusy(true);
+      setError('');
+      if (password.trim() === ADMIN_PASSWORD) {
+        setToken(LOCAL_ADMIN_TOKEN);
+        localStorage.setItem(TOKEN_KEY, LOCAL_ADMIN_TOKEN);
+        setAdminOpen(false);
+        setPassword('');
+      } else {
+        setError('Неверный пароль.');
+      }
+      setBusy(false);
+      return;
+    }
+
     try {
       setBusy(true);
       setError('');
@@ -204,6 +362,17 @@ function App() {
 
   const submit = async () => {
     if (!name.trim() || !token) return;
+    if (mode === 'local') {
+      setBusy(true);
+      const state = readLocalState();
+      upsertLocalTierEntry(state, active, name.trim(), rank);
+      writeLocalState(state);
+      await fetchCategory(active, 'local');
+      setEntryOpen(false);
+      setBusy(false);
+      return;
+    }
+
     try {
       setBusy(true);
       await axios.post(
